@@ -39,7 +39,7 @@ def encode_image_to_base64(image: Image.Image):
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def call_openrouter_vlm(image: Image.Image) -> str:
+def call_openrouter_vlm(messages: list[dict]) -> str:
     """Send the image to Qwen-VL (OpenRouter API) and get the description."""
 
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -47,11 +47,7 @@ def call_openrouter_vlm(image: Image.Image) -> str:
         "Authorization": f"Bearer {st.secrets['OPENROUTER_API_KEY']}",
         "Content-Type": "application/json",
     }
-
-    base64_image = encode_image_to_base64(image)
-    data_url = f"data:image/jpeg;base64,{base64_image}"
-
-    messages = [
+    prepared_messages = [
         {
             "role": "system",
             "content": (
@@ -63,27 +59,36 @@ def call_openrouter_vlm(image: Image.Image) -> str:
                 "Избегай выдумывания данных, которых нет на снимке. "
                 "Избегай комментариев касательно метаданных (дат, имён) отображающиеся на изображении, описывай только анатомические признаки."
             )
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Опиши этот снимок."
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url
-                    }
-                }
-            ]
         }
     ]
+    for msg in messages:
+        prepared_msg = {
+            "role" : msg["role"],
+            "content" : []
+        }
+        image = msg.get("image", None)
+        prepared_msg["content"].append(
+            {
+                "type" : "text",
+                "text" : msg["content"]
+            }
+        )
+        if image:
+            base64_image = encode_image_to_base64(image)
+            data_url = f"data:image/jpeg;base64,{base64_image}"
+            prepared_msg["content"].append(
+                {
+                    "type" : "image_url",
+                    "image_url" : {
+                        "url" : data_url
+                    }
+                }
+            )
+        prepared_messages.append(prepared_msg)
 
     payload = {
         "model": "qwen/qwen3-vl-235b-a22b-instruct",
-        "messages": messages,
+        "messages": prepared_messages,
         "stream": True
     }
 
@@ -127,15 +132,59 @@ def call_openrouter_vlm(image: Image.Image) -> str:
 # UI
 # -------------------------
 
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+if "clear_input" in st.session_state and st.session_state.clear_input:
+    st.session_state.user_input = ""
+    st.session_state.uploader_key += 1 
+    st.session_state.clear_input = False
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        if msg["content"].strip():
+            st.markdown(msg["content"])
+        if "image" in msg:
+            st.image(msg["image"], width=300)
+
 uploaded_file = st.file_uploader(
-    "Загрузите изображение", 
-    type=["png", "jpg", "jpeg", "dcm"]
+    "📎 Прикрепите изображение (опционально)",
+    type=["png", "jpg", "jpeg"],
+    key=f"uploader_{st.session_state.uploader_key}"
 )
+user_text = st.text_input("💬 Ваш запрос", key="user_input", placeholder="Введите запрос или прикрепите изображение")
 
-if uploaded_file:
-    image = read_image(uploaded_file)
+if st.button("📤 Отправить"):
+    if user_text.strip() or uploaded_file:
+        msg = {"role": "user", "content": user_text}
 
-    st.image(image, caption="Загруженное изображение", use_container_width=True)
+    if uploaded_file:
+        msg["image"] = read_image(uploaded_file)
 
-    if st.button("Анализ с помощью ИИ"):
-        st.write_stream(call_openrouter_vlm(image))
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if "image" in msg:
+            st.image(msg["image"], width=300)
+    st.session_state.messages.append(msg)
+
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+
+        for chunk in call_openrouter_vlm(st.session_state.messages):
+            full_response += chunk
+            message_placeholder.markdown(full_response + "▌")
+    
+    message_placeholder.markdown(full_response)
+    
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": full_response
+    })
+
+    st.session_state.clear_input = True
+    st.rerun()
